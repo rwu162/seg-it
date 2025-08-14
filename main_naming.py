@@ -1,11 +1,85 @@
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import argparse
 import csv
+import os
+import fnmatch
 
 
 def truncate_first_20(text: str) -> str:
     """Extract first 20 characters from text"""
     return text[:20]
+
+
+def handle_network_path(path_str: str) -> Path:
+    """Handle UNC network paths and convert them to a workable format"""
+    # For UNC paths, use os.listdir to check existence instead of Path.exists()
+    if path_str.startswith('\\\\') or path_str.startswith('//'):
+        try:
+            # Normalize the path
+            normalized = os.path.normpath(path_str)
+            # Test if we can access it
+            os.listdir(normalized)
+            # If we can list it, create a Path object that works with os methods
+            return NetworkPath(normalized)
+        except (OSError, PermissionError, FileNotFoundError):
+            pass
+    
+    # For regular paths, use normal Path handling
+    return Path(path_str)
+
+
+class NetworkPath:
+    """A Path-like class that handles UNC network paths using os methods"""
+    def __init__(self, path_str):
+        self.path_str = os.path.normpath(path_str)
+    
+    def __str__(self):
+        return self.path_str
+    
+    def exists(self):
+        try:
+            os.listdir(self.path_str) if self.is_dir() else os.path.isfile(self.path_str)
+            return True
+        except (OSError, PermissionError, FileNotFoundError):
+            return False
+    
+    def is_file(self):
+        try:
+            return os.path.isfile(self.path_str)
+        except (OSError, PermissionError):
+            return False
+    
+    def is_dir(self):
+        try:
+            return os.path.isdir(self.path_str)
+        except (OSError, PermissionError):
+            return False
+    
+    def glob(self, pattern):
+        """Glob for network paths using os.listdir"""
+        try:
+            files = []
+            for item in os.listdir(self.path_str):
+                if fnmatch.fnmatch(item.lower(), pattern.lower()):
+                    full_path = os.path.join(self.path_str, item)
+                    files.append(NetworkPath(full_path))
+            return files
+        except (OSError, PermissionError):
+            return []
+    
+    @property
+    def name(self):
+        return os.path.basename(self.path_str)
+    
+    @property 
+    def stem(self):
+        name = self.name
+        return os.path.splitext(name)[0] if '.' in name else name
+    
+    @property
+    def suffix(self):
+        name = self.name
+        return os.path.splitext(name)[1] if '.' in name else ''
 
 
 def process_jpg_files(path: Path, quiet: bool = False) -> set:
@@ -56,13 +130,15 @@ def export_to_csv(serial_data: set, csv_path: Path):
             writer.writerow([serial])
 
 
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Extract serial numbers from JPG filenames'
     )
     parser.add_argument(
         'path',
-        type=Path,
+        type=str,  # Changed from Path to str to handle UNC paths
         help='Path to JPG file or directory containing JPG files'
     )
     parser.add_argument(
@@ -78,13 +154,16 @@ def main():
     
     args = parser.parse_args()
     
-    if not args.path.exists():
+    # Handle network paths
+    path = handle_network_path(args.path)
+    
+    if not path.exists():
         if not args.quiet:
             print(f"Error: '{args.path}' not found")
         return set()
     
-    # Process files
-    serial_data = process_jpg_files(args.path, args.quiet)
+    # Process files (extract serials)
+    serial_data = process_jpg_files(path, args.quiet)
     
     # Export to CSV if requested
     if args.csv:
