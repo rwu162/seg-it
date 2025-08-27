@@ -82,16 +82,16 @@ class NetworkPath:
         return os.path.splitext(name)[1] if '.' in name else ''
 
 
-def process_jpg_files(path: Path, quiet: bool = False) -> set:
+def process_jpg_files(path: Path, quiet: bool = False) -> list:
     """Process JPG files and extract serial numbers"""
-    serial_data = set()
+    serial_data = []
     
     
     if path.is_file():
         # Single file
-        if path.suffix.lower() in ['.jpg', '.jpeg']:
+        if path.suffix.lower() == '.jpg':
             serial = truncate_first_20(path.stem)
-            serial_data.add(serial)
+            serial_data.append((path.name, serial))
             if not quiet:
                 print(f"Processed: {path.name} -> Serial: {serial}")
         else:
@@ -100,9 +100,7 @@ def process_jpg_files(path: Path, quiet: bool = False) -> set:
     
     elif path.is_dir():
         # Directory of files
-        jpg_files = list(path.glob('*.jpg')) + list(path.glob('*.jpeg'))
-        jpg_files.extend(path.glob('*.JPG'))
-        jpg_files.extend(path.glob('*.JPEG'))
+        jpg_files = list(path.glob('*.jpg'))
         
         if not jpg_files:
             if not quiet:
@@ -114,20 +112,20 @@ def process_jpg_files(path: Path, quiet: bool = False) -> set:
         
         for filepath in jpg_files:
             serial = truncate_first_20(filepath.stem)
-            serial_data.add(serial)
+            serial_data.append((filepath.name, serial))
             if not quiet:
                 print(f"Processed: {filepath.name} -> Serial: {serial}")
     
     return serial_data
 
 
-def export_to_csv(serial_data: set, csv_path: Path):
+def export_to_csv(serial_data: list, csv_path: Path):
     """Export serial numbers to CSV file"""
     with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(['Serial_Number'])  # Header
-        for serial in sorted(serial_data):
-            writer.writerow([serial])
+        writer.writerow(['Filename', 'Serial_Number'])  # Header
+        for filename, serial in sorted(serial_data):
+            writer.writerow([filename, serial])
 
 
 
@@ -160,7 +158,7 @@ def main():
     if not path.exists():
         if not args.quiet:
             print(f"Error: '{args.path}' not found")
-        return set()
+        return []
     
     # Process files (extract serials)
     serial_data = process_jpg_files(path, args.quiet)
@@ -182,9 +180,9 @@ def main():
         else:
             print("No JPG files were processed")
     elif not args.csv:
-        # In quiet mode without CSV, print serials to stdout
-        for serial in sorted(serial_data):
-            print(serial)
+        # In quiet mode without CSV, print tuples to stdout
+        for filename, serial in sorted(serial_data):
+            print((filename, serial))
     
     return serial_data
 

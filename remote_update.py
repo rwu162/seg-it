@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-# Import configuration
+# Import configuration first
 try:
     from config import *
 except ImportError:
@@ -15,50 +15,18 @@ except ImportError:
     print("Please copy config.example.py to config.py and fill in your values.")
     sys.exit(1)
 
-# HARDCODED PATHS FOR TESTING - UPDATE THESE FOR YOUR ENVIRONMENT!!!
-TARGET_FOLDER = r"\\192.168.2.2\home\Target\6-16-2025 OK"  # Target folder path
-
-# Database connection will be configured via user input
-
-
-def get_database_config():
-    """Get database configuration from config file or user input as fallback"""
-    # Try to use config values first
-    if all([DB_SERVER, DB_NAME, DB_USERNAME, DB_PASSWORD]):
-        return DB_SERVER, DB_NAME, DB_USERNAME, DB_PASSWORD
-    
-    # Fallback to user input if config is incomplete
-    print("Database configuration incomplete in config.py")
-    print("SQL Server Database Configuration:")
-    server = input("Enter server name/IP (e.g., localhost, 192.168.1.100): ").strip()
-    database = input("Enter database name: ").strip()
-    username = input("Enter username: ").strip()
-    password = input("Enter password: ").strip()
-    
-    return server, database, username, password
+# Database connection using config
+if DB_TYPE == "sqlite":
+    engine = create_engine(f"sqlite:///{DB_PATH}")
+elif DB_TYPE == "mssql":
+    engine = create_engine(f'mssql+pyodbc://{DB_USERNAME}:{DB_PASSWORD}@{DB_SERVER}/{DB_NAME}?driver=ODBC+Driver+17+for+SQL+Server')
+else:
+    raise ValueError(f"Unsupported database type: {DB_TYPE}")
 
 
-def connect_to_database(server=None, database=None, username=None, password=None):
-    """Connect to SQL Server database using SQLAlchemy"""
-    if not all([server, database]):
-        server, database, username, password = get_database_config()
-    
-    try:
-        # Build SQLAlchemy connection string for SQL Server Authentication
-        conn_str = f"mssql+pyodbc://{username}:{password}@{server}/{database}?driver=ODBC+Driver+17+for+SQL+Server"
-        
-        engine = create_engine(conn_str)
-        # Test the connection
-        conn = engine.connect()
-        conn.close()  # Close test connection
-        print("Database connection successful!")
-        return engine
-    except SQLAlchemyError as e:
-        print(f"Database connection failed: {e}")
-        return None
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        return None
+def connect_to_database():
+    """Return the global engine - connection already defined at top"""
+    return engine
 
 
 def get_batch_file_paths_from_db(filenames_and_serials):
@@ -85,9 +53,15 @@ def get_batch_file_paths_from_db(filenames_and_serials):
             # Create placeholders for the IN clause
             placeholders = ','.join([f':filename_{i}' for i in range(len(filenames))])
             
+            # Dynamic table name based on database type
+            if DB_TYPE == "mssql":
+                table_name = f"dbo.{DB_TABLE}"  # SQL Server with schema
+            else:
+                table_name = DB_TABLE  # SQLite without schema
+                
             query = text(f"""
             SELECT {DB_FILENAME_COLUMN}, {DB_FILEPATH_COLUMN}, {DB_SERIAL_COLUMN}
-            FROM [{DB_DATABASE}].[{DB_TABLE}]
+            FROM {table_name}
             WHERE {DB_FILENAME_COLUMN} IN ({placeholders})
             """)
             
@@ -135,9 +109,9 @@ def get_file_path_mock(filename, serial):
     return mock_path
 
 
-# --------------------------------------------------------------------------------
+
 # REMOTE FILE SWAP FUNCTIONALITY
-# --------------------------------------------------------------------------------
+
 
 
 def get_serials_from_main(folder_path: str) -> set:
@@ -150,13 +124,24 @@ def get_serials_from_main(folder_path: str) -> set:
             '--quiet'
         ], capture_output=True, text=True, check=True)
         
-        # Parse the output - each line should be a serial number
-        serials = set()
+        # Parse the output - each line is a tuple (filename, serial)  
+        file_serial_pairs = []
         for line in result.stdout.strip().split('\n'):
-            if line.strip():
-                serials.add(line.strip())
+            if line.strip() and line.startswith('('):
+                # Parse tuple format: ('filename.jpg', 'SERIAL12345')
+                try:
+                    import ast
+                    filename, serial = ast.literal_eval(line.strip())
+                    file_serial_pairs.append((filename, serial))
+                except:
+                    # Fallback parsing
+                    parts = line.split("', '")
+                    if len(parts) >= 2:
+                        filename = parts[0].lstrip("('")
+                        serial = parts[1].rstrip("')")
+                        file_serial_pairs.append((filename, serial))
         
-        return serials
+        return file_serial_pairs
     except subprocess.CalledProcessError as e:
         print(f"Error calling main_naming.py: {e}")
         print(f"stderr: {e.stderr}")
@@ -167,26 +152,28 @@ def get_serials_from_main(folder_path: str) -> set:
 
 
 def get_files_with_serials(folder_path: str) -> dict:
-    """Get JPG files and match them with serials from main.py"""
+    """Get JPG files and match them with database records using filename and serial"""
     files_with_serials = {}
     
-    # Get serials from main_naming.py
-    serials = get_serials_from_main(folder_path)
-    if not serials:
-        print(f"No serials found in {folder_path}")
+    # Get filename-serial pairs from main_naming.py
+    file_serial_pairs = get_serials_from_main(folder_path)
+    if not file_serial_pairs:
+        print(f"No file-serial pairs found in {folder_path}")
         return files_with_serials
     
-    # Find JPG files and match them to serials
+    # Match against database records
     path = Path(folder_path)
-    if path.exists() and path.is_dir():
-        jpg_files = list(path.glob('*.jpg')) + list(path.glob('*.jpeg'))
-        jpg_files.extend(path.glob('*.JPG'))
-        jpg_files.extend(path.glob('*.JPEG'))
-        
-        for filepath in jpg_files:
-            serial = filepath.stem[:20]  # First 20 characters
-            if serial in serials:
-                files_with_serials[serial] = filepath
+    if path.exists() and path.is_dir():        
+        for filename, serial in file_serial_pairs:
+            file_path = path / filename
+            if file_path.exists():
+                # Use composite key (serial + filename) for unique identification
+                composite_key = f"{serial}|{filename}"
+                files_with_serials[composite_key] = {
+                    'filename': filename,
+                    'filepath': file_path,
+                    'serial': serial
+                }
                 
         print(f"Found {len(files_with_serials)} files with matching serials")
     
@@ -199,16 +186,19 @@ def move_files_to_remote_paths(source_files_with_serials: dict, dry_run=False):
         print("No files to process")
         return False
     
-    # Prepare data for batch database query
+    # Prepare data for batch database query (extract filename and serial from composite key)
     filenames_and_serials = []
-    for serial, local_filepath in source_files_with_serials.items():
-        filename = local_filepath.name
+    for composite_key, file_data in source_files_with_serials.items():
+        filename = file_data['filename']
+        serial = file_data['serial']
         filenames_and_serials.append((filename, serial))
     
     print(f"\nQuerying database for {len(filenames_and_serials)} files...")
     
     # Single database query for all files
     db_file_paths = get_batch_file_paths_from_db(filenames_and_serials)
+    
+    #print(f"DEBUG - db_file_paths: {db_file_paths}")
     
     if not db_file_paths:
         print("No matching files found in database")
@@ -219,12 +209,14 @@ def move_files_to_remote_paths(source_files_with_serials: dict, dry_run=False):
     
     print(f"\nProcessing {len(db_file_paths)} files...")
     
-    for filename, remote_db_path in db_file_paths.items():
-        # Find the local file
+    for row in db_file_paths.items():
+        filename = row[0]
+        remote_db_path = row[1]
+        # Find the local file using composite key (serial + filename)
         local_file = None
-        for serial, local_filepath in source_files_with_serials.items():
-            if local_filepath.name == filename:
-                local_file = local_filepath
+        for composite_key, file_data in source_files_with_serials.items():
+            if file_data['filename'] == filename:
+                local_file = file_data['filepath']
                 break
         
         if not local_file:
@@ -246,9 +238,14 @@ def move_files_to_remote_paths(source_files_with_serials: dict, dry_run=False):
             remote_dir = os.path.dirname(remote_db_path)
             os.makedirs(remote_dir, exist_ok=True)
             
-            # Move file from local to remote database path
-            shutil.move(str(local_file), remote_db_path)
-            print(f"MOVED: {filename}")
+            # Remove existing file at destination if it exists
+            if os.path.exists(remote_db_path):
+                os.remove(remote_db_path)
+                print(f"REMOVED old file: {remote_db_path}")
+            
+            # Copy file from local to remote database path
+            shutil.copy2(str(local_file), remote_db_path)
+            print(f"COPIED: {filename}")
             print(f"  FROM: {local_file}")
             print(f"  TO:   {remote_db_path}")
             moved_count += 1
